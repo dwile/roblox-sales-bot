@@ -10,17 +10,18 @@ import {
   Routes
 } from "discord.js";
 
-// ===== ENV =====
+/* ===== ENV ===== */
 const {
   DISCORD_TOKEN,
   DISCORD_CLIENT_ID,
+  DISCORD_GUILD_ID,
   OWNER_DISCORD_ID,
   DATABASE_URL,
   GROUP_IDS
 } = process.env;
 
-if (!DISCORD_TOKEN || !DISCORD_CLIENT_ID) {
-  throw new Error("❌ DISCORD_TOKEN or DISCORD_CLIENT_ID missing");
+if (!DISCORD_TOKEN || !DISCORD_CLIENT_ID || !DISCORD_GUILD_ID) {
+  throw new Error("❌ Discord ENV missing");
 }
 
 const GROUPS = (GROUP_IDS || "10432375,6655396")
@@ -29,7 +30,7 @@ const GROUPS = (GROUP_IDS || "10432375,6655396")
 
 const CHECK_INTERVAL = 60 * 1000;
 
-// ===== DB =====
+/* ===== DB ===== */
 const { Pool } = pkg;
 const db = new Pool({ connectionString: DATABASE_URL });
 
@@ -45,7 +46,7 @@ CREATE TABLE IF NOT EXISTS sales (
 );
 `);
 
-// ===== DISCORD CLIENT =====
+/* ===== DISCORD CLIENT ===== */
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -54,43 +55,53 @@ const client = new Client({
   partials: ["CHANNEL"]
 });
 
-// ===== SLASH COMMANDS (GLOBAL) =====
+/* ===== SLASH COMMANDS (GUILD) ===== */
 const commands = [
   { name: "sales_today", description: "Today's Robux earned" },
   { name: "sales_week", description: "This week's Robux earned" },
   { name: "sales_month", description: "This month's Robux earned" },
   { name: "sales_chart", description: "Sales chart (last 7 days)" },
   {
-  name: "group_chart",
-  description: "Group sales chart (last 7 days)",
-  options: [
-    {
-      name: "group",
-      description: "Roblox Group ID",
-      type: 3,
-      required: true
-    }
-  ]
-},
+    name: "group_chart",
+    description: "Group sales chart (last 7 days)",
+    options: [
+      {
+        name: "group",
+        description: "Roblox Group ID",
+        type: 3,
+        required: true
+      }
+    ]
+  },
   { name: "sales_predict", description: "AI prediction for next 24h" }
 ];
 
 const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
 
+/* 🔥 ÖNCE ESKİ GLOBAL KOMUTLARI SİL */
 await rest.put(
   Routes.applicationCommands(DISCORD_CLIENT_ID),
+  { body: [] }
+);
+
+/* ✅ GUILD KOMUTLARINI EKLE */
+await rest.put(
+  Routes.applicationGuildCommands(
+    DISCORD_CLIENT_ID,
+    DISCORD_GUILD_ID
+  ),
   { body: commands }
 );
 
-console.log("✅ Global slash commands registered");
+console.log("✅ Slash commands registered");
 
-// ===== INTERACTIONS =====
+/* ===== INTERACTIONS ===== */
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
   const name = interaction.commandName;
 
-  // ---- totals ----
+  // totals
   if (["sales_today", "sales_week", "sales_month"].includes(name)) {
     let interval = "day";
     if (name === "sales_week") interval = "week";
@@ -107,7 +118,7 @@ client.on("interactionCreate", async interaction => {
     );
   }
 
-  // ---- AI prediction ----
+  // AI prediction
   if (name === "sales_predict") {
     const r = await db.query(`
       SELECT DATE(created) d, SUM(robux) r
@@ -126,11 +137,11 @@ client.on("interactionCreate", async interaction => {
 
     const prediction = Math.round(t / Math.max(w, 1));
     return interaction.reply(
-      `🤖 **AI Prediction:** ~${prediction} Robux in next 24h`
+      `🤖 **AI Prediction:** ~${prediction} Robux (next 24h)`
     );
   }
 
-  // ---- charts ----
+  // charts
   if (name === "sales_chart") return sendChart(interaction);
   if (name === "group_chart") {
     const gid = Number(interaction.options.getString("group"));
@@ -138,7 +149,7 @@ client.on("interactionCreate", async interaction => {
   }
 });
 
-// ===== QUICKCHART =====
+/* ===== QUICKCHART ===== */
 async function sendChart(interaction, groupId = null) {
   const q = groupId
     ? `SELECT DATE(created) d, SUM(robux) r
@@ -155,26 +166,20 @@ async function sendChart(interaction, groupId = null) {
   const labels = r.rows.map(x => x.d.toISOString().slice(0, 10));
   const data = r.rows.map(x => x.r);
 
-  const chartUrl = `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify({
-    type: "line",
-    data: {
-      labels,
-      datasets: [{ label: "Robux", data }]
-    }
-  }))}`;
+  const chartUrl = `https://quickchart.io/chart?c=${encodeURIComponent(
+    JSON.stringify({
+      type: "line",
+      data: {
+        labels,
+        datasets: [{ label: "Robux", data }]
+      }
+    })
+  )}`;
 
   await interaction.reply({ content: chartUrl });
 }
 
-// ===== ROBLOX =====
-async function getAvatar(userId) {
-  const r = await fetch(
-    `https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${userId}&size=150x150&format=Png`
-  );
-  const j = await r.json();
-  return j.data?.[0]?.imageUrl;
-}
-
+/* ===== ROBLOX ===== */
 async function pollGroup(groupId) {
   const url = `https://economy.roblox.com/v2/groups/${groupId}/transactions?limit=10&sortOrder=Desc&transactionType=Sale`;
   const r = await fetch(url);
@@ -203,7 +208,6 @@ async function pollGroup(groupId) {
       ]
     );
 
-    const avatar = await getAvatar(sale.agent.id);
     const user = await client.users.fetch(OWNER_DISCORD_ID);
 
     const embed = new EmbedBuilder()
@@ -213,14 +217,13 @@ async function pollGroup(groupId) {
         { name: "Buyer", value: sale.agent.name, inline: true },
         { name: "Price", value: `${sale.currency.amount} Robux`, inline: true }
       )
-      .setThumbnail(avatar)
       .setTimestamp(new Date(sale.created));
 
     await user.send({ embeds: [embed] });
   }
 }
 
-// ===== DASHBOARD =====
+/* ===== DASHBOARD ===== */
 const app = express();
 app.get("/dashboard", async (_, res) => {
   const r = await db.query(`
@@ -233,7 +236,7 @@ app.get("/dashboard", async (_, res) => {
 });
 app.listen(3000);
 
-// ===== START =====
+/* ===== START ===== */
 client.once("ready", () => {
   console.log("✅ Bot Online");
   setInterval(() => GROUPS.forEach(pollGroup), CHECK_INTERVAL);
