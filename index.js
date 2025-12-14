@@ -10,27 +10,29 @@ import {
   Routes
 } from "discord.js";
 
-/* ===== ENV ===== */
+/* ================= ENV ================= */
 const {
   DISCORD_TOKEN,
   DISCORD_CLIENT_ID,
-  DISCORD_GUILD_ID,
   OWNER_DISCORD_ID,
   DATABASE_URL,
   GROUP_IDS
 } = process.env;
 
-if (!DISCORD_TOKEN || !DISCORD_CLIENT_ID || !DISCORD_GUILD_ID) {
-  throw new Error("❌ Discord ENV missing");
-}
+console.log("🔍 ENV CHECK", {
+  DISCORD_TOKEN: !!DISCORD_TOKEN,
+  DISCORD_CLIENT_ID: !!DISCORD_CLIENT_ID,
+  DATABASE_URL: !!DATABASE_URL
+});
 
-const GROUPS = (GROUP_IDS || "10432375,6655396")
+const GROUPS = (GROUP_IDS || "")
   .split(",")
+  .filter(Boolean)
   .map(x => Number(x.trim()));
 
 const CHECK_INTERVAL = 60 * 1000;
 
-/* ===== DB ===== */
+/* ================= DB ================= */
 const { Pool } = pkg;
 const db = new Pool({ connectionString: DATABASE_URL });
 
@@ -46,16 +48,13 @@ CREATE TABLE IF NOT EXISTS sales (
 );
 `);
 
-/* ===== DISCORD CLIENT ===== */
+/* ================= DISCORD ================= */
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.DirectMessages
-  ],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.DirectMessages],
   partials: ["CHANNEL"]
 });
 
-/* ===== SLASH COMMANDS (GUILD) ===== */
+/* ================= SLASH COMMANDS ================= */
 const commands = [
   { name: "sales_today", description: "Today's Robux earned" },
   { name: "sales_week", description: "This week's Robux earned" },
@@ -78,30 +77,28 @@ const commands = [
 
 const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
 
-/* 🔥 ÖNCE ESKİ GLOBAL KOMUTLARI SİL */
+/* ⛔ İlk deploy'da wipe önerilir */
+/*
 await rest.put(
   Routes.applicationCommands(DISCORD_CLIENT_ID),
   { body: [] }
 );
+console.log("🧹 Commands wiped");
+*/
 
-/* ✅ GUILD KOMUTLARINI EKLE */
 await rest.put(
-  Routes.applicationGuildCommands(
-    DISCORD_CLIENT_ID,
-    DISCORD_GUILD_ID
-  ),
+  Routes.applicationCommands(DISCORD_CLIENT_ID),
   { body: commands }
 );
 
 console.log("✅ Slash commands registered");
 
-/* ===== INTERACTIONS ===== */
+/* ================= INTERACTIONS ================= */
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
   const name = interaction.commandName;
 
-  // totals
   if (["sales_today", "sales_week", "sales_month"].includes(name)) {
     let interval = "day";
     if (name === "sales_week") interval = "week";
@@ -118,7 +115,6 @@ client.on("interactionCreate", async interaction => {
     );
   }
 
-  // AI prediction
   if (name === "sales_predict") {
     const r = await db.query(`
       SELECT DATE(created) d, SUM(robux) r
@@ -136,12 +132,9 @@ client.on("interactionCreate", async interaction => {
     });
 
     const prediction = Math.round(t / Math.max(w, 1));
-    return interaction.reply(
-      `🤖 **AI Prediction:** ~${prediction} Robux (next 24h)`
-    );
+    return interaction.reply(`🤖 **AI Prediction:** ~${prediction} Robux`);
   }
 
-  // charts
   if (name === "sales_chart") return sendChart(interaction);
   if (name === "group_chart") {
     const gid = Number(interaction.options.getString("group"));
@@ -149,15 +142,13 @@ client.on("interactionCreate", async interaction => {
   }
 });
 
-/* ===== QUICKCHART ===== */
+/* ================= CHART ================= */
 async function sendChart(interaction, groupId = null) {
   const q = groupId
-    ? `SELECT DATE(created) d, SUM(robux) r
-       FROM sales
+    ? `SELECT DATE(created) d, SUM(robux) r FROM sales
        WHERE group_id=$1 AND created >= NOW()-INTERVAL '7 days'
        GROUP BY d ORDER BY d`
-    : `SELECT DATE(created) d, SUM(robux) r
-       FROM sales
+    : `SELECT DATE(created) d, SUM(robux) r FROM sales
        WHERE created >= NOW()-INTERVAL '7 days'
        GROUP BY d ORDER BY d`;
 
@@ -176,10 +167,10 @@ async function sendChart(interaction, groupId = null) {
     })
   )}`;
 
-  await interaction.reply({ content: chartUrl });
+  await interaction.reply(chartUrl);
 }
 
-/* ===== ROBLOX ===== */
+/* ================= ROBLOX ================= */
 async function pollGroup(groupId) {
   const url = `https://economy.roblox.com/v2/groups/${groupId}/transactions?limit=10&sortOrder=Desc&transactionType=Sale`;
   const r = await fetch(url);
@@ -193,6 +184,7 @@ async function pollGroup(groupId) {
       "SELECT 1 FROM sales WHERE id_hash=$1",
       [sale.idHash]
     );
+   com
     if (exists.rowCount) continue;
 
     await db.query(
@@ -208,38 +200,32 @@ async function pollGroup(groupId) {
       ]
     );
 
-    const user = await client.users.fetch(OWNER_DISCORD_ID);
+    if (!OWNER_DISCORD_ID) return;
 
+    const user = await client.users.fetch(OWNER_DISCORD_ID);
     const embed = new EmbedBuilder()
-      .setTitle("👕 New Clothing Sale")
-      .addFields(
-        { name: "Item", value: sale.details.name, inline: true },
-        { name: "Buyer", value: sale.agent.name, inline: true },
-        { name: "Price", value: `${sale.currency.amount} Robux`, inline: true }
-      )
-      .setTimestamp(new Date(sale.created));
+      .setTitle("👕 New Sale")
+      .setDescription(`${sale.details.name} — ${sale.currency.amount} Robux`)
+      .setTimestamp();
 
     await user.send({ embeds: [embed] });
   }
 }
 
-/* ===== DASHBOARD ===== */
+/* ================= API ================= */
 const app = express();
 app.get("/dashboard", async (_, res) => {
-  const r = await db.query(`
-    SELECT group_id, DATE(created) d, SUM(robux) r
-    FROM sales
-    GROUP BY group_id, d
-    ORDER BY d
-  `);
+  const r = await db.query(`SELECT * FROM sales ORDER BY created DESC`);
   res.json(r.rows);
 });
 app.listen(3000);
 
-/* ===== START ===== */
-client.once("ready", () => {
+/* ================= START ================= */
+client.once("clientReady", () => {
   console.log("✅ Bot Online");
-  setInterval(() => GROUPS.forEach(pollGroup), CHECK_INTERVAL);
+  if (GROUPS.length) {
+    setInterval(() => GROUPS.forEach(pollGroup), CHECK_INTERVAL);
+  }
 });
 
 client.login(DISCORD_TOKEN);
