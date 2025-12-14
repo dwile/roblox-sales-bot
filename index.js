@@ -3,7 +3,6 @@ import fetch from "node-fetch";
 import express from "express";
 import pkg from "pg";
 import { Client, GatewayIntentBits, REST, Routes, EmbedBuilder } from "discord.js";
-import { ChartJSNodeCanvas } from "chartjs-node-canvas";
 
 // ===== ENV =====
 const {
