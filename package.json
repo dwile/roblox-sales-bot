@@ -1,0 +1,17 @@
+{
+  "name": "roblox-sales-ai-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "chartjs-node-canvas": "^4.1.6",
+    "discord.js": "^14.14.1",
+    "dotenv": "^17.2.3",
+    "express": "^4.19.2",
+    "node-fetch": "^3.3.2",
+    "pg": "^8.11.3"
+  }
+}
