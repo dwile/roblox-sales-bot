@@ -16,21 +16,25 @@ const {
   DISCORD_CLIENT_ID,
   OWNER_DISCORD_ID,
   DATABASE_URL,
-  GROUP_IDS
+  GROUP_IDS,
+  ALERT_SINGLE_SALE,
+  ALERT_DAILY_TOTAL
 } = process.env;
 
-console.log("🔍 ENV CHECK", {
-  DISCORD_TOKEN: !!DISCORD_TOKEN,
-  DISCORD_CLIENT_ID: !!DISCORD_CLIENT_ID,
-  DATABASE_URL: !!DATABASE_URL
-});
+if (!DISCORD_TOKEN || !DISCORD_CLIENT_ID || !DATABASE_URL) {
+  console.error("❌ ENV eksik. DISCORD_TOKEN / DISCORD_CLIENT_ID / DATABASE_URL gerekli");
+  process.exit(1);
+}
 
+/* ================= CONST ================= */
 const GROUPS = (GROUP_IDS || "")
   .split(",")
   .filter(Boolean)
   .map(x => Number(x.trim()));
 
 const CHECK_INTERVAL = 60 * 1000;
+const SINGLE_ALERT = Number(ALERT_SINGLE_SALE || 0);
+const DAILY_ALERT = Number(ALERT_DAILY_TOTAL || 0);
 
 /* ================= DB ================= */
 const { Pool } = pkg;
@@ -48,7 +52,7 @@ CREATE TABLE IF NOT EXISTS sales (
 );
 `);
 
-/* ================= DISCORD ================= */
+/* ================= DISCORD CLIENT ================= */
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.DirectMessages],
   partials: ["CHANNEL"]
@@ -77,68 +81,72 @@ const commands = [
 
 const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
 
-/* ⛔ İlk deploy'da wipe önerilir */
-/*
-await rest.put(
-  Routes.applicationCommands(DISCORD_CLIENT_ID),
-  { body: [] }
-);
-console.log("🧹 Commands wiped");
-*/
-
+// 🔥 Global register (ilk sefer 1–2 dk gecikebilir)
 await rest.put(
   Routes.applicationCommands(DISCORD_CLIENT_ID),
   { body: commands }
 );
-
 console.log("✅ Slash commands registered");
 
 /* ================= INTERACTIONS ================= */
 client.on("interactionCreate", async interaction => {
-  if (!interaction.isChatInputCommand()) return;
+  try {
+    if (!interaction.isChatInputCommand()) return;
+    const name = interaction.commandName;
 
-  const name = interaction.commandName;
+    // totals
+    if (["sales_today", "sales_week", "sales_month"].includes(name)) {
+      let interval = "day";
+      if (name === "sales_week") interval = "week";
+      if (name === "sales_month") interval = "month";
 
-  if (["sales_today", "sales_week", "sales_month"].includes(name)) {
-    let interval = "day";
-    if (name === "sales_week") interval = "week";
-    if (name === "sales_month") interval = "month";
+      const r = await db.query(
+        `SELECT COALESCE(SUM(robux),0) total
+         FROM sales
+         WHERE created >= NOW() - INTERVAL '1 ${interval}'`
+      );
 
-    const r = await db.query(
-      `SELECT COALESCE(SUM(robux),0) total
-       FROM sales
-       WHERE created >= NOW() - INTERVAL '1 ${interval}'`
-    );
+      return interaction.reply(
+        `💰 **${interval.toUpperCase()} TOTAL:** ${r.rows[0].total} Robux`
+      );
+    }
 
-    return interaction.reply(
-      `💰 **${interval.toUpperCase()} TOTAL:** ${r.rows[0].total} Robux`
-    );
-  }
+    // AI prediction
+    if (name === "sales_predict") {
+      const r = await db.query(`
+        SELECT DATE(created) d, SUM(robux) r
+        FROM sales
+        WHERE created >= NOW() - INTERVAL '7 days'
+        GROUP BY d ORDER BY d
+      `);
 
-  if (name === "sales_predict") {
-    const r = await db.query(`
-      SELECT DATE(created) d, SUM(robux) r
-      FROM sales
-      WHERE created >= NOW() - INTERVAL '7 days'
-      GROUP BY d ORDER BY d
-    `);
+      const values = r.rows.map(x => x.r);
+      const last = values.at(-1) || 0;
 
-    const values = r.rows.map(x => x.r);
-    let w = 0, t = 0;
-    values.forEach((v, i) => {
-      const weight = i + 1;
-      w += weight;
-      t += v * weight;
-    });
+      let w = 0, t = 0;
+      values.forEach((v, i) => {
+        const weight = i + 1;
+        w += weight;
+        t += v * weight;
+      });
 
-    const prediction = Math.round(t / Math.max(w, 1));
-    return interaction.reply(`🤖 **AI Prediction:** ~${prediction} Robux`);
-  }
+      const weighted = t / Math.max(w, 1);
+      const prediction = Math.round(weighted * 0.7 + last * 0.3);
 
-  if (name === "sales_chart") return sendChart(interaction);
-  if (name === "group_chart") {
-    const gid = Number(interaction.options.getString("group"));
-    return sendChart(interaction, gid);
+      return interaction.reply(`🤖 **AI Prediction:** ~${prediction} Robux`);
+    }
+
+    // charts
+    if (name === "sales_chart") return sendChart(interaction);
+    if (name === "group_chart") {
+      const gid = Number(interaction.options.getString("group"));
+      return sendChart(interaction, gid);
+    }
+  } catch (err) {
+    console.error("❌ Interaction error", err);
+    if (!interaction.replied) {
+      interaction.reply("⚠️ Something went wrong");
+    }
   }
 });
 
@@ -172,50 +180,66 @@ async function sendChart(interaction, groupId = null) {
 
 /* ================= ROBLOX ================= */
 async function pollGroup(groupId) {
-  const url = `https://economy.roblox.com/v2/groups/${groupId}/transactions?limit=10&sortOrder=Desc&transactionType=Sale`;
-  const r = await fetch(url);
-  const j = await r.json();
-  if (!j.data) return;
+  try {
+    const url = `https://economy.roblox.com/v2/groups/${groupId}/transactions?limit=10&sortOrder=Desc&transactionType=Sale`;
+    const r = await fetch(url);
+    const j = await r.json();
+    if (!j.data) return;
 
-  for (const sale of j.data.reverse()) {
-    if (sale.details?.type !== "Asset") continue;
+    for (const sale of j.data.reverse()) {
+      if (sale.details?.type !== "Asset") continue;
 
-    const exists = await db.query(
-      "SELECT 1 FROM sales WHERE id_hash=$1",
-      [sale.idHash]
-    );
-   com
-    if (exists.rowCount) continue;
+      const exists = await db.query(
+        "SELECT 1 FROM sales WHERE id_hash=$1",
+        [sale.idHash]
+      );
+      if (exists.rowCount) continue;
 
-    await db.query(
-      "INSERT INTO sales VALUES ($1,$2,$3,$4,$5,$6,$7)",
-      [
-        sale.idHash,
-        groupId,
-        sale.details.name,
-        sale.agent.name,
-        sale.agent.id,
-        sale.currency.amount,
-        sale.created
-      ]
-    );
+      await db.query(
+        "INSERT INTO sales VALUES ($1,$2,$3,$4,$5,$6,$7)",
+        [
+          sale.idHash,
+          groupId,
+          sale.details.name,
+          sale.agent.name,
+          sale.agent.id,
+          sale.currency.amount,
+          sale.created
+        ]
+      );
 
-    if (!OWNER_DISCORD_ID) return;
+      // 🔔 single sale alert
+      if (OWNER_DISCORD_ID && sale.currency.amount >= SINGLE_ALERT) {
+        const user = await client.users.fetch(OWNER_DISCORD_ID);
+        await user.send(
+          `🔥 **BIG SALE:** ${sale.details.name} → ${sale.currency.amount} Robux`
+        );
+      }
+    }
 
-    const user = await client.users.fetch(OWNER_DISCORD_ID);
-    const embed = new EmbedBuilder()
-      .setTitle("👕 New Sale")
-      .setDescription(`${sale.details.name} — ${sale.currency.amount} Robux`)
-      .setTimestamp();
-
-    await user.send({ embeds: [embed] });
+    // 🔔 daily alert
+    if (OWNER_DISCORD_ID && DAILY_ALERT > 0) {
+      const r2 = await db.query(`
+        SELECT COALESCE(SUM(robux),0) total
+        FROM sales
+        WHERE created >= CURRENT_DATE
+      `);
+      if (r2.rows[0].total >= DAILY_ALERT) {
+        const user = await client.users.fetch(OWNER_DISCORD_ID);
+        await user.send(`📈 **Daily target reached:** ${r2.rows[0].total} Robux`);
+      }
+    }
+  } catch (e) {
+    console.error("❌ Roblox poll error", e);
   }
 }
 
-/* ================= API ================= */
+/* ================= DASHBOARD API ================= */
 const app = express();
 app.get("/dashboard", async (_, res) => {
-  const r = await db.query(`SELECT * FROM sales ORDER BY created DESC`);
+  const r = await db.query(
+    "SELECT * FROM sales ORDER BY created DESC LIMIT 100"
+  );
   res.json(r.rows);
 });
 app.listen(3000);
@@ -226,6 +250,10 @@ client.once("clientReady", () => {
   if (GROUPS.length) {
     setInterval(() => GROUPS.forEach(pollGroup), CHECK_INTERVAL);
   }
+});
+
+process.on("unhandledRejection", err => {
+  console.error("🔥 UNHANDLED", err);
 });
 
 client.login(DISCORD_TOKEN);
