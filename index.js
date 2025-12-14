@@ -1,18 +1,33 @@
-import 'dotenv/config';
+import "dotenv/config";
 import fetch from "node-fetch";
 import express from "express";
 import pkg from "pg";
-import { Client, GatewayIntentBits, EmbedBuilder } from "discord.js";
+import {
+  Client,
+  GatewayIntentBits,
+  EmbedBuilder,
+  REST,
+  Routes
+} from "discord.js";
 
 // ===== ENV =====
 const {
   DISCORD_TOKEN,
+  DISCORD_CLIENT_ID,
+  DISCORD_GUILD_ID,
   OWNER_DISCORD_ID,
   DATABASE_URL,
   GROUP_IDS
 } = process.env;
 
-const GROUPS = (GROUP_IDS || "10432375,6655396").split(",").map(x => Number(x.trim()));
+if (!DISCORD_TOKEN || !DISCORD_CLIENT_ID || !DISCORD_GUILD_ID) {
+  throw new Error("❌ Discord ENV missing");
+}
+
+const GROUPS = (GROUP_IDS || "10432375,6655396")
+  .split(",")
+  .map(x => Number(x.trim()));
+
 const CHECK_INTERVAL = 60 * 1000;
 
 // ===== DB =====
@@ -33,8 +48,48 @@ CREATE TABLE IF NOT EXISTS sales (
 
 // ===== DISCORD =====
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.DirectMessages],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.DirectMessages
+  ],
   partials: ["CHANNEL"]
+});
+
+// ===== SLASH COMMANDS =====
+const commands = [
+  { name: "sales_today", description: "Today's Robux earned" },
+  { name: "sales_week", description: "This week's Robux earned" },
+  { name: "sales_month", description: "This month's Robux earned" }
+];
+
+const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
+
+await rest.put(
+  Routes.applicationGuildCommands(
+    DISCORD_CLIENT_ID,
+    DISCORD_GUILD_ID
+  ),
+  { body: commands }
+);
+
+console.log("✅ Slash commands registered");
+
+// ===== INTERACTIONS =====
+client.on("interactionCreate", async interaction => {
+  if (!interaction.isChatInputCommand()) return;
+
+  let interval = "day";
+  if (interaction.commandName === "sales_week") interval = "week";
+  if (interaction.commandName === "sales_month") interval = "month";
+
+  const res = await db.query(
+    `SELECT SUM(robux) total FROM sales
+     WHERE created >= NOW() - INTERVAL '1 ${interval}'`
+  );
+
+  await interaction.reply(
+    `💰 **${interval.toUpperCase()} TOTAL:** ${res.rows[0].total || 0} Robux`
+  );
 });
 
 // ===== ROBLOX =====
@@ -91,13 +146,14 @@ async function pollGroup(groupId) {
   }
 }
 
-// ===== DASHBOARD API =====
+// ===== DASHBOARD =====
 const app = express();
 app.get("/dashboard", async (_, res) => {
   const r = await db.query(`
     SELECT group_id, DATE(created) d, SUM(robux) r
     FROM sales
-    GROUP BY group_id, d ORDER BY d
+    GROUP BY group_id, d
+    ORDER BY d
   `);
   res.json(r.rows);
 });
