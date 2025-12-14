@@ -61,12 +61,17 @@ const commands = [
   { name: "sales_month", description: "This month's Robux earned" },
   { name: "sales_chart", description: "Sales chart (last 7 days)" },
   {
-    name: "group_chart",
-    description: "Group sales chart (last 7 days)",
-    options: [
-      { name: "group", type: 3, required: true }
-    ]
-  },
+  name: "group_chart",
+  description: "Group sales chart (last 7 days)",
+  options: [
+    {
+      name: "group",
+      description: "Roblox Group ID",
+      type: 3,
+      required: true
+    }
+  ]
+},
   { name: "sales_predict", description: "AI prediction for next 24h" }
 ];
 
