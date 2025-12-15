@@ -22,22 +22,18 @@ const {
 } = process.env;
 
 if (!DISCORD_TOKEN || !DISCORD_CLIENT_ID || !DATABASE_URL || !ROBLOX_COOKIE) {
-  console.error("❌ Missing ENV");
+  console.error("❌ Missing ENV variables");
   process.exit(1);
 }
 
 /* ================= CONST ================= */
 const GROUPS = (GROUP_IDS || "")
   .split(",")
-  .filter(Boolean)
-  .map(x => Number(x.trim()));
+  .map(x => Number(x.trim()))
+  .filter(Boolean);
 
 const CHECK_INTERVAL = 60 * 1000;
 const ANALYTICS_INTERVAL = 60 * 60 * 1000;
-
-/* ================= SAFE GUARDS ================= */
-const pollingGroups = new Set();
-let analyticsRunning = false;
 
 /* ================= DB ================= */
 const { Pool } = pkg;
@@ -52,36 +48,16 @@ CREATE TABLE IF NOT EXISTS sales (
   buyer_id BIGINT,
   robux INT,
   created TIMESTAMP
-);
-`);
+)`);
 
 await db.query(`
 CREATE TABLE IF NOT EXISTS analytics_daily (
   date DATE PRIMARY KEY,
   total INT,
   avg7 FLOAT,
-  avg14 FLOAT,
   trend FLOAT,
   volatility FLOAT
-);
-`);
-
-await db.query(`
-CREATE TABLE IF NOT EXISTS analytics_items (
-  item TEXT PRIMARY KEY,
-  total INT,
-  last7 INT,
-  trend FLOAT
-);
-`);
-
-await db.query(`
-CREATE TABLE IF NOT EXISTS anomalies (
-  date DATE,
-  reason TEXT,
-  value INT
-);
-`);
+)`);
 
 /* ================= DISCORD ================= */
 const client = new Client({
@@ -92,8 +68,7 @@ const client = new Client({
 /* ================= SLASH COMMANDS ================= */
 const commands = [
   { name: "sales_today", description: "Today's Robux earned" },
-  { name: "sales_week", description: "This week's Robux earned" },
-  { name: "sales_month", description: "This month's Robux earned" },
+  { name: "sales_week", description: "Last 7 days Robux" },
   { name: "sales_chart", description: "Sales chart (7 days)" },
   { name: "sales_predict", description: "AI forecast (24h)" }
 ];
@@ -105,51 +80,43 @@ await rest.put(Routes.applicationCommands(DISCORD_CLIENT_ID), { body: commands }
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
-  const name = interaction.commandName;
-
-  if (["sales_today", "sales_week", "sales_month"].includes(name)) {
-    const interval =
-      name === "sales_week" ? "7 days" :
-      name === "sales_month" ? "30 days" : "1 day";
-
-    const r = await db.query(
-      `SELECT COALESCE(SUM(robux),0) total
-       FROM sales WHERE created >= NOW() - INTERVAL '${interval}'`
-    );
-
-    return interaction.reply(`💰 **TOTAL:** ${r.rows[0].total} Robux`);
+  if (interaction.commandName === "sales_today") {
+    const r = await db.query(`
+      SELECT COALESCE(SUM(robux),0) total
+      FROM sales WHERE created >= CURRENT_DATE
+    `);
+    return interaction.reply(`💰 **Today:** ${r.rows[0].total} Robux`);
   }
 
-  if (name === "sales_predict") {
+  if (interaction.commandName === "sales_week") {
     const r = await db.query(`
-      SELECT total, avg7, trend, volatility
-      FROM analytics_daily
+      SELECT COALESCE(SUM(robux),0) total
+      FROM sales WHERE created >= NOW()-INTERVAL '7 days'
+    `);
+    return interaction.reply(`📊 **Last 7 Days:** ${r.rows[0].total} Robux`);
+  }
+
+  if (interaction.commandName === "sales_predict") {
+    const r = await db.query(`
+      SELECT * FROM analytics_daily
       ORDER BY date DESC LIMIT 1
     `);
 
     if (!r.rowCount) {
-      return interaction.reply("📉 Not enough data yet");
+      return interaction.reply("📉 Not enough data yet.");
     }
 
     const d = r.rows[0];
-    const prediction = Math.max(
-      Math.round(d.avg7 * (1 + d.trend)),
-      0
-    );
-
-    const confidence =
-      d.volatility < d.avg7 * 0.3 ? "High" :
-      d.volatility < d.avg7 * 0.6 ? "Medium" : "Low";
+    const prediction = Math.max(Math.round(d.avg7 * (1 + d.trend)), 0);
 
     return interaction.reply(
       `🤖 **AI Forecast (24h)**\n` +
-      `~${prediction} Robux\n` +
-      `Trend: ${d.trend > 0 ? "📈 Up" : "📉 Down"}\n` +
-      `Confidence: ${confidence}`
+      `Expected: **${prediction} Robux**\n` +
+      `Trend: ${d.trend > 0 ? "📈 Up" : "📉 Down"}`
     );
   }
 
-  if (name === "sales_chart") {
+  if (interaction.commandName === "sales_chart") {
     const r = await db.query(`
       SELECT DATE(created) d, SUM(robux) r
       FROM sales
@@ -171,11 +138,8 @@ client.on("interactionCreate", async interaction => {
   }
 });
 
-/* ================= ROBLOX POLL ================= */
+/* ================= ROBLOX POLLER ================= */
 async function pollGroup(groupId) {
-  if (pollingGroups.has(groupId)) return;
-  pollingGroups.add(groupId);
-
   try {
     const r = await fetch(
       `https://economy.roblox.com/v2/groups/${groupId}/transactions?limit=10&sortOrder=Desc&transactionType=Sale`,
@@ -217,7 +181,7 @@ async function pollGroup(groupId) {
           .setTitle("🛒 New Sale")
           .addFields(
             { name: "Item", value: sale.details.name, inline: true },
-            { name: "Price", value: `${sale.currency.amount} Robux`, inline: true },
+            { name: "Robux", value: `${sale.currency.amount}`, inline: true },
             { name: "Group ID", value: String(groupId), inline: true }
           )
           .setTimestamp();
@@ -227,126 +191,66 @@ async function pollGroup(groupId) {
     }
   } catch (e) {
     console.error("Poll error", e);
-  } finally {
-    pollingGroups.delete(groupId);
   }
 }
 
-/* ================= ANALYTICS ENGINE ================= */
+/* ================= ANALYTICS ================= */
 async function runAnalytics() {
-  if (analyticsRunning) return;
-  analyticsRunning = true;
+  const r = await db.query(`
+    SELECT DATE(created) d, SUM(robux) r
+    FROM sales
+    GROUP BY d ORDER BY d
+  `);
 
-  try {
-    const r = await db.query(`
-      SELECT DATE(created) d, SUM(robux) r
-      FROM sales
-      GROUP BY d ORDER BY d
-    `);
+  if (r.rows.length < 7) return;
 
-    const values = r.rows.map(x => x.r);
-    if (values.length < 7) return;
+  const values = r.rows.map(x => x.r);
+  const today = r.rows.at(-1).d;
+  const total = values.at(-1);
+  const avg7 = values.slice(-7).reduce((a,b)=>a+b,0)/7;
+  const trend = (total - avg7) / Math.max(avg7,1);
 
-    const today = r.rows.at(-1).d;
-    const total = values.at(-1);
-    const avg7 = values.slice(-7).reduce((a,b)=>a+b,0)/7;
-    const avg14 = values.slice(-14).reduce((a,b)=>a+b,0)/Math.min(14,values.length);
+  const variance = values.slice(-7)
+    .reduce((a,b)=>a+Math.pow(b-avg7,2),0)/7;
+  const volatility = Math.sqrt(variance);
 
-    const trend = (total - avg7) / Math.max(avg7,1);
-    const variance = values.slice(-7).reduce((a,b)=>a+Math.pow(b-avg7,2),0)/7;
-    const volatility = Math.sqrt(variance);
-
-    await db.query(`
-      INSERT INTO analytics_daily
-      VALUES ($1,$2,$3,$4,$5,$6)
-      ON CONFLICT (date) DO UPDATE
-      SET total=$2, avg7=$3, avg14=$4, trend=$5, volatility=$6
-    `,[today,total,avg7,avg14,trend,volatility]);
-
-    if (total > avg7 + 2 * volatility) {
-      await db.query(
-        "INSERT INTO anomalies VALUES ($1,$2,$3)",
-        [today,"Spike detected",total]
-      );
-    }
-  } catch (e) {
-    console.error("Analytics error", e);
-  } finally {
-    analyticsRunning = false;
-  }
+  await db.query(`
+    INSERT INTO analytics_daily
+    VALUES ($1,$2,$3,$4,$5)
+    ON CONFLICT (date)
+    DO UPDATE SET total=$2, avg7=$3, trend=$4, volatility=$5
+  `,[today,total,avg7,trend,volatility]);
 }
 
 /* ================= DASHBOARD ================= */
 const app = express();
 
 app.get("/dashboard", async (_, res) => {
-  const stats = await db.query(
-    "SELECT * FROM analytics_daily ORDER BY date DESC LIMIT 1"
-  );
-
-  const a = stats.rows[0] || {};
+  const today = await db.query(`
+    SELECT COALESCE(SUM(robux),0) r, COUNT(*) c
+    FROM sales WHERE created >= CURRENT_DATE
+  `);
 
   res.send(`
 <!doctype html>
 <html>
 <head>
 <title>Roblox Sales Dashboard</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
-body {
-  background:#0f172a;
-  color:#e5e7eb;
-  font-family:Inter,Arial;
-  padding:30px;
-}
-h1 { margin-bottom:20px }
-.cards {
-  display:grid;
-  grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
-  gap:15px;
-}
-.card {
-  background:#111827;
-  padding:20px;
-  border-radius:12px;
-  box-shadow:0 10px 30px rgba(0,0,0,.3);
-}
-.card h3 {
-  font-size:14px;
-  color:#9ca3af;
-  margin-bottom:8px;
-}
-.card p {
-  font-size:26px;
-  font-weight:bold;
-}
+body{background:#0f172a;color:#e5e7eb;font-family:Arial;padding:30px}
+.card{background:#111827;padding:20px;border-radius:12px;margin-bottom:10px}
 </style>
 </head>
-
 <body>
-<h1>📊 Roblox Sales Analytics</h1>
-
-<div class="cards">
-  <div class="card">
-    <h3>Today Robux</h3>
-    <p>${a.total_robux || 0}</p>
-  </div>
-  <div class="card">
-    <h3>Sales Count</h3>
-    <p>${a.sales_count || 0}</p>
-  </div>
-  <div class="card">
-    <h3>Top Item</h3>
-    <p>${a.top_item || "-"}</p>
-  </div>
-</div>
-
+<h1>📊 Roblox Sales</h1>
+<div class="card">Today Robux: <b>${today.rows[0].r}</b></div>
+<div class="card">Sales Count: <b>${today.rows[0].c}</b></div>
 </body>
 </html>
 `);
 });
 
-app.listen(3000);
+app.listen(process.env.PORT || 3000);
 
 /* ================= START ================= */
 client.once("clientReady", () => {
