@@ -1,7 +1,6 @@
 import "dotenv/config";
 import fetch from "node-fetch";
 import express from "express";
-import cookieParser from "cookie-parser";
 import pkg from "pg";
 import {
   Client,
@@ -205,7 +204,6 @@ async function runAnalytics() {
 
 /* ================= DASHBOARD + AUTH ================= */
 const app = express();
-app.use(cookieParser());
 
 const oauthUrl = `https://discord.com/api/oauth2/authorize?client_id=${DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(BASE_URL+"/auth/callback")}&response_type=code&scope=identify`;
 
