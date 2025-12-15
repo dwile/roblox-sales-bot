@@ -6,7 +6,8 @@ import {
   Client,
   GatewayIntentBits,
   REST,
-  Routes
+  Routes,
+  EmbedBuilder
 } from "discord.js";
 
 /* ================= ENV ================= */
@@ -36,6 +37,7 @@ const CHECK_INTERVAL = 60 * 1000;
 /* ================= SAFE GUARDS ================= */
 const pollingGroups = new Set();
 const processingSales = new Set();
+const groupCache = new Map();
 
 /* ================= DB ================= */
 const { Pool } = pkg;
@@ -83,6 +85,20 @@ const commands = [
 const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
 await rest.put(Routes.applicationCommands(DISCORD_CLIENT_ID), { body: commands });
 console.log("✅ Slash commands registered");
+
+/* ================= HELPERS ================= */
+async function getGroupName(groupId) {
+  if (groupCache.has(groupId)) return groupCache.get(groupId);
+  try {
+    const r = await fetch(`https://groups.roblox.com/v1/groups/${groupId}`);
+    const j = await r.json();
+    const name = j.name || `Group ${groupId}`;
+    groupCache.set(groupId, name);
+    return name;
+  } catch {
+    return `Group ${groupId}`;
+  }
+}
 
 /* ================= INTERACTIONS ================= */
 client.on("interactionCreate", async interaction => {
@@ -195,7 +211,19 @@ async function pollGroup(groupId) {
 
       if (OWNER_DISCORD_ID && sale.currency.amount >= ALERT_SINGLE_SALE) {
         const user = await client.users.fetch(OWNER_DISCORD_ID);
-        await user.send(`🔥 **SALE:** ${sale.details.name} → ${sale.currency.amount} Robux`);
+        const groupName = await getGroupName(groupId);
+
+        const embed = new EmbedBuilder()
+          .setTitle("💰 Sale")
+          .setColor(0x00ff99)
+          .addFields(
+            { name: "Item", value: sale.details.name },
+            { name: "Robux", value: `${sale.currency.amount}`, inline: true },
+            { name: "Group", value: groupName, inline: true }
+          )
+          .setTimestamp(new Date(sale.created));
+
+        await user.send({ embeds: [embed] });
       }
 
       setTimeout(() => processingSales.delete(sale.idHash), 60_000);
@@ -210,40 +238,12 @@ async function pollGroup(groupId) {
 /* ================= DASHBOARD ================= */
 const app = express();
 
-app.get("/api/stats", async (_, res) => {
-  const today = await db.query("SELECT COALESCE(SUM(robux),0) r FROM sales WHERE created >= CURRENT_DATE");
-  const week = await db.query("SELECT COALESCE(SUM(robux),0) r FROM sales WHERE created >= NOW()-INTERVAL '7 days'");
-  const top = await db.query(`
-    SELECT item, SUM(robux) r FROM sales
-    GROUP BY item ORDER BY r DESC LIMIT 1
-  `);
-
-  res.json({
-    today: today.rows[0].r,
-    week: week.rows[0].r,
-    topItem: top.rows[0] || null
-  });
-});
-
-app.get("/api/chart", async (_, res) => {
-  const r = await db.query(`
-    SELECT DATE(created) d, SUM(robux) r
-    FROM sales WHERE created >= NOW()-INTERVAL '7 days'
-    GROUP BY d ORDER BY d
-  `);
-
-  res.json({
-    labels: r.rows.map(x => x.d.toISOString().slice(0,10)),
-    data: r.rows.map(x => x.r)
-  });
-});
-
-app.get("/dashboard", (_, res) => {
+app.get("/dashboard", async (_, res) => {
   res.send(`
 <!doctype html>
 <html>
 <head>
-<title>Roblox Sales</title>
+<title>Roblox Sales Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
 body{background:#111;color:#eee;font-family:Arial;padding:20px}
@@ -274,6 +274,34 @@ fetch('/api/chart').then(r=>r.json()).then(c=>{
 `);
 });
 
+app.get("/api/stats", async (_, res) => {
+  const today = await db.query("SELECT COALESCE(SUM(robux),0) r FROM sales WHERE created >= CURRENT_DATE");
+  const week = await db.query("SELECT COALESCE(SUM(robux),0) r FROM sales WHERE created >= NOW()-INTERVAL '7 days'");
+  const top = await db.query(`
+    SELECT item, SUM(robux) r FROM sales
+    GROUP BY item ORDER BY r DESC LIMIT 1
+  `);
+
+  res.json({
+    today: today.rows[0].r,
+    week: week.rows[0].r,
+    topItem: top.rows[0] || null
+  });
+});
+
+app.get("/api/chart", async (_, res) => {
+  const r = await db.query(`
+    SELECT DATE(created) d, SUM(robux) r
+    FROM sales WHERE created >= NOW()-INTERVAL '7 days'
+    GROUP BY d ORDER BY d
+  `);
+
+  res.json({
+    labels: r.rows.map(x => x.d.toISOString().slice(0,10)),
+    data: r.rows.map(x => x.r)
+  });
+});
+
 app.listen(3000);
 
 /* ================= AUTO REPORTS ================= */
@@ -281,14 +309,28 @@ setInterval(async () => {
   if (!OWNER_DISCORD_ID) return;
   const r = await db.query("SELECT COALESCE(SUM(robux),0) r FROM sales WHERE created >= CURRENT_DATE");
   const user = await client.users.fetch(OWNER_DISCORD_ID);
-  await user.send(`📊 **Daily Report:** ${r.rows[0].r} Robux`);
+
+  const embed = new EmbedBuilder()
+    .setTitle("📊 Daily Report")
+    .setColor(0x3399ff)
+    .setDescription(`Total: **${r.rows[0].r} Robux**`)
+    .setTimestamp();
+
+  await user.send({ embeds: [embed] });
 }, 24 * 60 * 60 * 1000);
 
 setInterval(async () => {
   if (!OWNER_DISCORD_ID) return;
   const r = await db.query("SELECT COALESCE(SUM(robux),0) r FROM sales WHERE created >= NOW()-INTERVAL '7 days'");
   const user = await client.users.fetch(OWNER_DISCORD_ID);
-  await user.send(`📈 **Weekly Report:** ${r.rows[0].r} Robux`);
+
+  const embed = new EmbedBuilder()
+    .setTitle("📈 Weekly Report")
+    .setColor(0xffcc00)
+    .setDescription(`Total: **${r.rows[0].r} Robux**`)
+    .setTimestamp();
+
+  await user.send({ embeds: [embed] });
 }, 7 * 24 * 60 * 60 * 1000);
 
 /* ================= START ================= */
