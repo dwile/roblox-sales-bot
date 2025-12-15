@@ -182,7 +182,12 @@ async function sendChart(interaction, groupId = null) {
 async function pollGroup(groupId) {
   try {
     const url = `https://economy.roblox.com/v2/groups/${groupId}/transactions?limit=10&sortOrder=Desc&transactionType=Sale`;
-    const r = await fetch(url);
+    const r = await fetch(url, {
+  headers: {
+    Cookie: `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}`,
+    "User-Agent": "Mozilla/5.0"
+  }
+});
     const j = await r.json();
     if (!j.data) return;
 
